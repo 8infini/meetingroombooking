@@ -14,7 +14,7 @@ const state = {
   time:         null,
   durationMins: null,
   room:         null,
-  scriptUrl:    'https://script.google.com/a/macros/zenithtoinvest.com/s/AKfycbyBVM13PN_NvG45RwF-lfPcYnMusn31Y771nUiNzv-yqEvRq2BCBRYpAuhVlX8FLe7g/exec',
+  scriptUrl:    'https://script.google.com/macros/s/AKfycbyyKt3W39yIjBbKUTrxSiQMSNI7DBdAeCT7Hu2SvEOWXAjiwLJ-i__6yXV8dsCA82fT/exec',
   demoMode:     false,
   bookedSlots:  {},   // { "YYYY-MM-DD|roomId": ["HH:MM", ...] }
   allBookings:  [],   // full booking objects for the calendar view
