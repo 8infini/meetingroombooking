@@ -14,7 +14,7 @@ const state = {
   time:         null,
   durationMins: null,
   room:         null,
-  scriptUrl:    localStorage.getItem('scriptUrl') || '',
+  scriptUrl:    'https://script.google.com/a/macros/zenithtoinvest.com/s/AKfycbyBVM13PN_NvG45RwF-lfPcYnMusn31Y771nUiNzv-yqEvRq2BCBRYpAuhVlX8FLe7g/exec',
   demoMode:     false,
   bookedSlots:  {},   // { "YYYY-MM-DD|roomId": ["HH:MM", ...] }
   allBookings:  [],   // full booking objects for the calendar view
@@ -565,5 +565,5 @@ $('cfg-demo').addEventListener('click', () => {
 /* ══════════════════════════════════════════════════════════════
    INIT
    ══════════════════════════════════════════════════════════════ */
-if (!state.scriptUrl) $('config-overlay').classList.remove('hidden');
+// URL hardcoded — no setup modal needed
 renderCalendar(new Date());
