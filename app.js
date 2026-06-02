@@ -1,8 +1,8 @@
 /* ─── Room definitions ──────────────────────────────────────── */
 const ROOMS = [
-  { id: 1, name: 'Room 1', cap: 4,  color: '#ffedd5', emoji: '🟠', accentColor: '#f97316', features: ['TV Screen'],          disabled: false },
-  { id: 2, name: 'Room 2', cap: 4,  color: '#f3e8ff', emoji: '🟣', accentColor: '#a855f7', features: ['TV Screen'],          disabled: false },
-  { id: 3, name: 'Room 3', cap: 10, color: '#d1fae5', emoji: '🟢', accentColor: '#22c55e', features: ['TV Screen', 'Couch'], disabled: false },
+  { id: 1, name: 'Room 1', cap: 5,  color: '#ffedd5', emoji: '🟠', accentColor: '#f97316', features: ['TV Screen'],          disabled: false },
+  { id: 2, name: 'Room 2', cap: 5,  color: '#f3e8ff', emoji: '🟣', accentColor: '#a855f7', features: ['TV Screen'],          disabled: false },
+  { id: 3, name: 'Room 3', cap: 12, color: '#d1fae5', emoji: '🟢', accentColor: '#22c55e', features: ['TV Screen', 'Couch'], disabled: false },
   { id: 4, name: 'Room 4', cap: 0,  color: '#e5e7eb', emoji: '⬜', accentColor: '#9ca3af', features: [],                    disabled: true  },
   { id: 5, name: 'Room 5', cap: 0,  color: '#e5e7eb', emoji: '⬜', accentColor: '#9ca3af', features: [],                    disabled: true  },
   { id: 6, name: 'Room 6', cap: 0,  color: '#e5e7eb', emoji: '⬜', accentColor: '#9ca3af', features: [],                    disabled: true  },
