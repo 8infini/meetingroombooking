@@ -413,6 +413,12 @@ $('booking-form').addEventListener('submit', async e => {
   $('submit-label').textContent = 'Saving…';
   $('submit-spinner').classList.remove('hidden');
 
+  const resetSubmit = () => {
+    $('submit-btn').disabled = false;
+    $('submit-label').textContent = 'Confirm Booking';
+    $('submit-spinner').classList.add('hidden');
+  };
+
   if (!state.demoMode && state.scriptUrl) {
     try {
       const res  = await fetch(state.scriptUrl, {
@@ -423,13 +429,19 @@ $('booking-form').addEventListener('submit', async e => {
       const result = await res.json();
       if (result.error === 'slot_taken') {
         // Someone else just grabbed this slot — refresh and send back to rooms
-        $('submit-btn').disabled = false;
-        $('submit-label').textContent = 'Confirm Booking';
-        $('submit-spinner').classList.add('hidden');
+        resetSubmit();
         alert(`Sorry, ${state.room.name} at ${state.time} was just booked by someone else. Please choose another slot.`);
         try { await fetchDay(dateStr(state.date), true); } catch(e) {}
         renderRooms();
         showStep('step-rooms');
+        return;
+      }
+      if (result.error) {
+        // Not saved (e.g. 'busy' — too many bookings at once). Keep the form so they can retry.
+        resetSubmit();
+        alert(result.error === 'busy'
+          ? 'The booking system is busy right now. Your booking was not saved — please press Confirm Booking again.'
+          : `Your booking was not saved (${result.error}). Please try again.`);
         return;
       }
     } catch(e) {
@@ -441,9 +453,7 @@ $('booking-form').addEventListener('submit', async e => {
   const { action, ...booking } = payload;
   cacheBooking({ ...booking, roomId: String(booking.roomId) });
 
-  $('submit-btn').disabled = false;
-  $('submit-label').textContent = 'Confirm Booking';
-  $('submit-spinner').classList.add('hidden');
+  resetSubmit();
 
   $('confirm-summary').innerHTML =
     `<strong>${name}</strong> has booked <strong>${state.room.name}</strong><br>` +
