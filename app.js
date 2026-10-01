@@ -16,9 +16,70 @@ const state = {
   room:         null,
   scriptUrl:    'https://script.google.com/macros/s/AKfycbykPou5yYptVlq3Th_GJjqM-j2azBW5Ng3wT43aLWTa3ZZk7RHBRuJSsWOlCehQNA/exec',
   demoMode:     false,
-  bookedSlots:  {},   // { "YYYY-MM-DD|roomId": ["HH:MM", ...] }
-  allBookings:  [],   // full booking objects for the calendar view
 };
+
+/* ─── Bookings cache (shared by Reserve Room + calendar view) ── */
+const CACHE_TTL_MS = 60 * 1000;
+const dayCache   = {};  // { "YYYY-MM-DD": { bookings: [...], at: ms } }
+const monthCache = {};  // { "YYYY-MM":    { dots: { "YYYY-MM-DD": ["1", ...] }, at: ms } }
+const inflight   = {};  // { key: Promise } — dedupes concurrent requests
+
+function isFresh(entry) { return !!entry && Date.now() - entry.at < CACHE_TTL_MS; }
+function isOnline()     { return !!state.scriptUrl && !state.demoMode; }
+function monthKey(d)    { return `${d.getFullYear()}-${String(d.getMonth()+1).padStart(2,'0')}`; }
+
+function dedupe(key, fn) {
+  if (!inflight[key]) inflight[key] = fn().finally(() => delete inflight[key]);
+  return inflight[key];
+}
+
+// Loads a month's dots and, if the backend returns them, every booking in the
+// month — which fills dayCache so clicking any day in the calendar is instant.
+function fetchMonth(month, force = false) {
+  if (!isOnline() || (!force && isFresh(monthCache[month]))) return Promise.resolve();
+  return dedupe('m:' + month, async () => {
+    const res  = await fetch(`${state.scriptUrl}?action=getMonth&month=${month}`);
+    const data = await res.json();
+    if (!data.dots) throw new Error(data.error || 'Bad response');
+    const at = Date.now();
+    monthCache[month] = { dots: data.dots, at };
+    if (Array.isArray(data.bookings)) {
+      const byDay = {};
+      data.bookings.forEach(b => (byDay[b.date] = byDay[b.date] || []).push(b));
+      const [y, m] = month.split('-').map(Number);
+      const days   = new Date(y, m, 0).getDate();
+      for (let d = 1; d <= days; d++) {
+        const ds = `${month}-${String(d).padStart(2,'0')}`;
+        dayCache[ds] = { bookings: byDay[ds] || [], at };
+      }
+    }
+  });
+}
+
+// Returns all bookings for one day, from cache when fresh.
+async function fetchDay(ds, force = false) {
+  if (!isOnline() || (!force && isFresh(dayCache[ds]))) return dayCache[ds]?.bookings || [];
+  // A month load already in flight may cover this day — wait for it instead of a second request
+  const pendingMonth = inflight['m:' + ds.slice(0, 7)];
+  if (!force && pendingMonth) {
+    try { await pendingMonth; } catch(e) {}
+    if (isFresh(dayCache[ds])) return dayCache[ds].bookings;
+  }
+  return dedupe('d:' + ds, async () => {
+    const res  = await fetch(`${state.scriptUrl}?action=getDay&date=${ds}`);
+    const data = await res.json();
+    if (!data.bookings) throw new Error(data.error || 'Bad response');
+    dayCache[ds] = { bookings: data.bookings, at: Date.now() };
+    return data.bookings;
+  });
+}
+
+// Adds a just-made booking to the cache so both views show it without a refetch
+function cacheBooking(booking) {
+  const entry = dayCache[booking.date];
+  if (entry) entry.bookings.push(booking);
+  else dayCache[booking.date] = { bookings: [booking], at: 0 };  // at: 0 → next read refreshes from server
+}
 
 /* ─── Helpers ───────────────────────────────────────────────── */
 const $ = id => document.getElementById(id);
@@ -58,8 +119,6 @@ function calcEndTime(startTime, durationMins) {
   return `${String(Math.floor(total / 60)).padStart(2,'0')}:${String(total % 60).padStart(2,'0')}`;
 }
 
-function slotKey(date, roomId) { return `${dateStr(date)}|${roomId}`; }
-
 function occupiedSlots(startTime, durationMins) {
   const slots = [];
   const [h, m] = startTime.split(':').map(Number);
@@ -75,9 +134,17 @@ function isAvailable(room, startTime, durationMins) {
   if (room.disabled) return false;
   const [h, m] = startTime.split(':').map(Number);
   if (h * 60 + m + durationMins > 20 * 60) return false;
-  const key    = slotKey(state.date, room.id);
-  const booked = state.bookedSlots[key] || [];
+  const booked = bookedSlotsFor(dateStr(state.date), room.id);
   return occupiedSlots(startTime, durationMins).every(s => !booked.includes(s));
+}
+
+// All occupied 30-min slots for a room on a day, derived from the cached day bookings
+function bookedSlotsFor(ds, roomId) {
+  const day = dayCache[ds];
+  if (!day) return [];
+  return day.bookings
+    .filter(b => String(b.roomId) === String(roomId))
+    .flatMap(b => occupiedSlots(String(b.time), parseInt(b.durationMins) || 60));
 }
 
 function buildTimeSlots() {
@@ -167,6 +234,8 @@ function renderCalendar(viewDate) {
     node.addEventListener('click', () => {
       const [y,m,d] = node.dataset.date.split('-').map(Number);
       state.date = new Date(y, m-1, d);
+      // Prefetch the day's bookings while the user picks a time and duration
+      fetchDay(node.dataset.date).catch(() => {});
       renderCalendar(calViewDate);
       syncSummary();
       renderTimeSlots();
@@ -253,28 +322,20 @@ $('back-time').addEventListener('click', () => {
    ══════════════════════════════════════════════════════════════ */
 async function goToRooms() {
   showStep('step-rooms');
-  $('rooms-avail-note').textContent = '';
-  $('rooms-list').innerHTML = `
-    <div class="rooms-checking">
-      <div class="rooms-checking-spinner"></div>
-      <span>Checking availability…</span>
-    </div>`;
-  await loadAllRoomBookings();
-  if ($('step-rooms').classList.contains('active')) {
+  const ds = dateStr(state.date);
+  // Usually already loaded by the prefetch on date click — only show the spinner if not
+  if (isOnline() && !isFresh(dayCache[ds])) {
+    $('rooms-avail-note').textContent = '';
+    $('rooms-list').innerHTML = `
+      <div class="rooms-checking">
+        <div class="rooms-checking-spinner"></div>
+        <span>Checking availability…</span>
+      </div>`;
+  }
+  try { await fetchDay(ds); } catch(e) {}
+  if ($('step-rooms').classList.contains('active') && state.date && dateStr(state.date) === ds) {
     renderRooms(false);
   }
-}
-
-async function loadAllRoomBookings() {
-  if (!state.scriptUrl || state.demoMode) return;
-  const ds = dateStr(state.date);
-  await Promise.all(ROOMS.map(async r => {
-    try {
-      const res  = await fetch(`${state.scriptUrl}?action=get&date=${ds}&room=${r.id}`);
-      const data = await res.json();
-      if (data.booked) state.bookedSlots[slotKey(state.date, r.id)] = data.booked;
-    } catch(e) {}
-  }));
 }
 
 function renderRooms(locked = false) {
@@ -366,7 +427,7 @@ $('booking-form').addEventListener('submit', async e => {
         $('submit-label').textContent = 'Confirm Booking';
         $('submit-spinner').classList.add('hidden');
         alert(`Sorry, ${state.room.name} at ${state.time} was just booked by someone else. Please choose another slot.`);
-        await loadAllRoomBookings();
+        try { await fetchDay(dateStr(state.date), true); } catch(e) {}
         renderRooms();
         showStep('step-rooms');
         return;
@@ -377,9 +438,8 @@ $('booking-form').addEventListener('submit', async e => {
   }
 
   // Cache locally
-  const key = slotKey(state.date, state.room.id);
-  state.bookedSlots[key] = [...(state.bookedSlots[key]||[]), ...occupiedSlots(state.time, state.durationMins)];
-  state.allBookings.push(payload);
+  const { action, ...booking } = payload;
+  cacheBooking({ ...booking, roomId: String(booking.roomId) });
 
   $('submit-btn').disabled = false;
   $('submit-label').textContent = 'Confirm Booking';
@@ -411,27 +471,19 @@ let bvViewDate     = new Date();
 let bvSelectedDate = null;
 
 /* ── Mini calendar ── */
-// Cached month dots: { "YYYY-MM": { "YYYY-MM-DD": ["1","2",...] } }
-const bvMonthDots = {};
+// Loads the month in the background, then redraws dots and the open day with fresh data
+async function bvRefreshMonth(month) {
+  try { await fetchMonth(month); } catch(e) { return; }
+  if (monthKey(bvViewDate) === month) bvRenderCalendar(bvViewDate);
+  if (bvSelectedDate && monthKey(bvSelectedDate) === month && dayCache[dateStr(bvSelectedDate)]) {
+    bvShowDay(dateStr(bvSelectedDate));
+  }
+}
 
-async function bvFetchMonthDots(viewDate) {
-  const month = `${viewDate.getFullYear()}-${String(viewDate.getMonth()+1).padStart(2,'0')}`;
-  if (bvMonthDots[month] || !state.scriptUrl || state.demoMode) return;
-  try {
-    const res  = await fetch(`${state.scriptUrl}?action=getMonth&month=${month}`);
-    const data = await res.json();
-    if (data.dots) {
-      bvMonthDots[month] = data.dots;
-      // Merge into allBookings stubs so local dots also work
-      Object.entries(data.dots).forEach(([date, roomIds]) => {
-        roomIds.forEach(rid => {
-          const exists = state.allBookings.some(x => x.date === date && String(x.roomId) === String(rid));
-          if (!exists) state.allBookings.push({ date, roomId: rid, _stub: true });
-        });
-      });
-      bvRenderCalendar(bvViewDate);
-    }
-  } catch(e) {}
+// Room ids with bookings on a day: from the day's bookings if loaded, else the month dots
+function bvRoomIdsOn(ds) {
+  if (dayCache[ds]) return [...new Set(dayCache[ds].bookings.map(b => String(b.roomId)))];
+  return monthCache[ds.slice(0, 7)]?.dots[ds] || [];
 }
 
 function bvRenderCalendar(viewDate) {
@@ -445,13 +497,6 @@ function bvRenderCalendar(viewDate) {
   const firstDay    = bvViewDate.getDay();
   const daysInMonth = new Date(bvViewDate.getFullYear(), bvViewDate.getMonth()+1, 0).getDate();
 
-  // Build dots map from allBookings (includes stubs from getMonth)
-  const bookingsByDate = {};
-  state.allBookings.forEach(b => {
-    if (!bookingsByDate[b.date]) bookingsByDate[b.date] = new Set();
-    bookingsByDate[b.date].add(String(b.roomId));
-  });
-
   let html = '';
   for (let i = 0; i < firstDay; i++) html += `<div class="cal-day empty"></div>`;
   for (let d = 1; d <= daysInMonth; d++) {
@@ -464,8 +509,9 @@ function bvRenderCalendar(viewDate) {
     else if (isToday) cls += ' today';
 
     let dots = '';
-    if (bookingsByDate[ds]) {
-      const colors = [...bookingsByDate[ds]].map(rid => {
+    const roomIds = bvRoomIdsOn(ds);
+    if (roomIds.length) {
+      const colors = roomIds.map(rid => {
         const r = ROOMS.find(r => r.id === parseInt(rid));
         return r ? r.accentColor : '#6b7280';
       });
@@ -484,8 +530,9 @@ function bvRenderCalendar(viewDate) {
     });
   });
 
-  // Fetch dots for this month in background
-  bvFetchMonthDots(bvViewDate);
+  // Load this month in the background if not cached (or stale)
+  const month = monthKey(bvViewDate);
+  if (isOnline() && !isFresh(monthCache[month])) bvRefreshMonth(month);
 }
 
 $('bv-cal-prev').addEventListener('click', () =>
@@ -494,49 +541,49 @@ $('bv-cal-next').addEventListener('click', () =>
   bvRenderCalendar(new Date(bvViewDate.getFullYear(), bvViewDate.getMonth()+1, 1)));
 
 /* ── Day bookings panel ── */
-async function bvLoadDay(date) {
+// Shows cached bookings instantly, then refreshes from the server only if stale (or forced)
+async function bvLoadDay(date, force = false) {
   // Normalize to midnight so calendar date-highlighting comparison works
   bvSelectedDate = new Date(date.getFullYear(), date.getMonth(), date.getDate());
   const ds = dateStr(bvSelectedDate);
-
   $('bv-day-title').textContent = fmtDate(date);
-  $('bv-day-sub').textContent   = 'Loading…';
-  $('bv-loading').classList.remove('hidden');
-  $('bv-empty').classList.add('hidden');
-  $('bv-cards').innerHTML = '';
 
-  // Fetch from sheets if connected
-  if (state.scriptUrl && !state.demoMode) {
-    try {
-      $('bv-refresh').classList.add('spinning');
-      const res  = await fetch(`${state.scriptUrl}?action=getDay&date=${ds}`);
-      const data = await res.json();
-      if (data.bookings) {
-        // Merge fetched bookings into local state (avoid duplicates)
-        data.bookings.forEach(b => {
-          const exists = state.allBookings.some(
-            x => x.date === b.date && x.roomId == b.roomId && x.time === b.time
-          );
-          if (!exists) state.allBookings.push(b);
-        });
-        bvRenderCalendar(bvViewDate);
-      }
-    } catch(e) {}
-    $('bv-refresh').classList.remove('spinning');
+  const cached = dayCache[ds];
+  if (cached || !isOnline()) {
+    bvShowDay(ds);
+    if (!isOnline() || (!force && isFresh(cached))) return;
+  } else {
+    $('bv-day-sub').textContent = 'Loading…';
+    $('bv-loading').classList.remove('hidden');
+    $('bv-empty').classList.add('hidden');
+    $('bv-cards').innerHTML = '';
   }
 
-  $('bv-loading').classList.add('hidden');
+  $('bv-refresh').classList.add('spinning');
+  let failed = false;
+  try { await fetchDay(ds, force); } catch(e) { failed = true; }
+  $('bv-refresh').classList.remove('spinning');
 
-  const dayBookings = state.allBookings
-    .filter(b => b.date === ds && !b._stub)
-    .sort((a, b) => a.time.localeCompare(b.time));
+  if (dateStr(bvSelectedDate) !== ds) return;  // user already clicked another day
+  bvShowDay(ds);
+  if (failed && !dayCache[ds]) $('bv-day-sub').textContent = 'Couldn’t load bookings — try refresh';
+  bvRenderCalendar(bvViewDate);
+}
+
+function bvShowDay(ds) {
+  $('bv-loading').classList.add('hidden');
+  const dayBookings = (dayCache[ds]?.bookings || [])
+    .slice()
+    .sort((a, b) => String(a.time).localeCompare(String(b.time)));
 
   if (dayBookings.length === 0) {
     $('bv-day-sub').textContent = 'No bookings';
+    $('bv-cards').innerHTML = '';
     $('bv-empty').classList.remove('hidden');
     return;
   }
 
+  $('bv-empty').classList.add('hidden');
   $('bv-day-sub').textContent = `${dayBookings.length} booking${dayBookings.length > 1 ? 's' : ''}`;
   bvRenderCards(dayBookings);
 }
@@ -575,7 +622,7 @@ function bvRenderCards(bookings) {
 }
 
 $('bv-refresh').addEventListener('click', () => {
-  if (bvSelectedDate) bvLoadDay(bvSelectedDate);
+  if (bvSelectedDate) bvLoadDay(bvSelectedDate, true);
 });
 
 /* ══════════════════════════════════════════════════════════════
