@@ -659,3 +659,11 @@ $('cfg-demo').addEventListener('click', () => {
    ══════════════════════════════════════════════════════════════ */
 // URL hardcoded — no setup modal needed
 renderCalendar(new Date());
+
+// Prefetch this month and next in the background so bookings are already loaded
+// by the time a date is picked (and the Calendar tab opens instantly)
+(() => {
+  const now = new Date();
+  fetchMonth(monthKey(now)).catch(() => {});
+  fetchMonth(monthKey(new Date(now.getFullYear(), now.getMonth() + 1, 1))).catch(() => {});
+})();
